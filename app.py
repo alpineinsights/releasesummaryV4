@@ -533,30 +533,29 @@ async def process_company_documents(company_id: str, company_name: str, storage_
             storage_handler = storage_handler_instance # Use the passed-in instance
             transcript_processor = TranscriptProcessor() # Assumes defined elsewhere (e.g., utils.py)
 
-            # Get company data from Quartr API using company ID
-            company_data = await quartr_api.get_company_events(company_id, session, event_type)
-            if not company_data:
-                logger.error(f"Failed to get company data for ID: {company_id}")
-                return [], None
-
-            logger.info(f"Processing documents for company: {company_name} (ID: {company_id}) - Seeking documents from the latest non-AGM event.") # Updated log message
-
-            events = company_data.get('events', [])
+            # ===== QUARTR API V3 INTEGRATION =====
+            # Step 1: Get events from v3 API
+            logger.info(f"[V3] Step 1: Fetching events for company: {company_name} (ID: {company_id})")
+            events_data = await quartr_api.get_events_v3(company_id, session, limit=100)
+            
+            events = events_data.get('events', [])
             if not events:
                 logger.warning(f"No events found for company: {company_name} (ID: {company_id})")
                 return [], None
 
+            logger.info(f"[V3] Retrieved {len(events)} events from v3 API")
+            
             # Sort events by date (descending) - ensures events[0] is the latest
-            events.sort(key=lambda x: x.get('eventDate', ''), reverse=True)
+            events.sort(key=lambda x: x.get('date', ''), reverse=True)
 
-            # --- NEW LOGIC: Focus only on the latest event, but skip AGM events --- 
+            # --- EVENT SELECTION LOGIC (same as before, works with v3 structure) --- 
             selected_event = None
             event_index = 0
             
             # Check if the latest event contains "AGM" in the title
             if events:
                 latest_event = events[0]
-                latest_event_title = latest_event.get('eventTitle', 'Unknown Event')
+                latest_event_title = latest_event.get('title', 'Unknown Event')  # v3 uses 'title'
                 
                 if 'AGM' in latest_event_title.upper():
                     logger.info(f"Latest event '{latest_event_title}' contains 'AGM' - looking for next available event")
@@ -578,37 +577,72 @@ async def process_company_documents(company_id: str, company_name: str, storage_
                 logger.warning(f"No events available for processing for company: {company_name} (ID: {company_id})")
                 return [], None
             
-            event_date = selected_event.get('eventDate', '').split('T')[0]
-            event_title = selected_event.get('eventTitle', 'Unknown Event')
-            logger.info(f"Selected event for processing: {event_title} ({event_date}) at index {event_index}")
+            # Extract event info (v3 uses 'date' and 'title')
+            event_date = selected_event.get('date', '').split('T')[0]
+            event_title = selected_event.get('title', 'Unknown Event')
+            selected_event_id = selected_event.get('id')
+            
+            logger.info(f"Selected event for processing: {event_title} ({event_date}) [ID: {selected_event_id}] at index {event_index}")
 
-            # Check for Slides in the selected event
-            pdf_url = selected_event.get('pdfUrl')
-            if pdf_url:
-                 selected_files_details.append({'url': pdf_url, 'type': 'slides', 'event_date': event_date, 'event_title': event_title})
-                 logger.info(f"Found slides in selected event: {event_title} ({event_date})")
-
-            # Check for Report in the selected event
-            report_url = selected_event.get('reportUrl')
-            if report_url:
-                 selected_files_details.append({'url': report_url, 'type': 'report', 'event_date': event_date, 'event_title': event_title})
-                 logger.info(f"Found report in selected event: {event_title} ({event_date})")
-
-            # Check for Transcript in the selected event
-            transcript_url = selected_event.get('transcriptUrl') # This might be the app URL
-            transcripts_data = selected_event.get('transcripts', {}) or selected_event.get('liveTranscripts', {})
-            # Check if any transcript info exists that the processor can use
-            # Prioritize checking the actual data source dict first, then the URL
-            if transcripts_data or transcript_url:
-                 selected_files_details.append({
-                     'url': transcript_url, # Pass the primary URL
-                     'type': 'transcript',
-                     'event_date': event_date,
-                     'event_title': event_title,
-                     'transcript_data_source': transcripts_data # Pass the dict for the processor
-                     })
-                 logger.info(f"Found transcript info in selected event: {event_title} ({event_date})")
-            # --- END NEW LOGIC ---
+            # Step 2: Fetch audio and documents for the selected event using v3 API
+            logger.info(f"[V3] Step 2: Fetching audio and documents for event ID: {selected_event_id}")
+            
+            # Fetch audio and documents in parallel
+            audio_task = quartr_api.get_audio_v3(company_id, [selected_event_id], session)
+            documents_task = quartr_api.get_documents_v3(company_id, [selected_event_id], session)
+            
+            audio_data, documents_data = await asyncio.gather(audio_task, documents_task)
+            
+            logger.info(f"[V3] Retrieved {len(audio_data)} audio files and {len(documents_data)} documents")
+            
+            # Step 3: Map documents to the selected event
+            event_map = quartr_api.map_documents_to_events([selected_event], audio_data, documents_data)
+            
+            if selected_event_id not in event_map:
+                logger.warning(f"Selected event {selected_event_id} not found in mapped results")
+                return [], None
+            
+            event_with_docs = event_map[selected_event_id]
+            documents = event_with_docs.get('documents', {})
+            
+            logger.info(f"[V3] Mapped documents: report={bool(documents.get('report'))}, "
+                       f"slides={bool(documents.get('slides'))}, "
+                       f"transcript={bool(documents.get('transcript'))}, "
+                       f"audio={bool(documents.get('audio'))}")
+            
+            # Build selected_files_details from the mapped documents
+            # Process slides
+            if documents.get('slides'):
+                selected_files_details.append({
+                    'url': documents['slides'],
+                    'type': 'slides',
+                    'event_date': event_date,
+                    'event_title': event_title
+                })
+                logger.info(f"[V3] Found slides for event: {event_title} ({event_date})")
+            
+            # Process report
+            if documents.get('report'):
+                selected_files_details.append({
+                    'url': documents['report'],
+                    'type': 'report',
+                    'event_date': event_date,
+                    'event_title': event_title
+                })
+                logger.info(f"[V3] Found report for event: {event_title} ({event_date})")
+            
+            # Process transcript (URL only for now - will be processed later)
+            transcript_url = documents.get('transcript')
+            if transcript_url:
+                selected_files_details.append({
+                    'url': transcript_url,
+                    'type': 'transcript',
+                    'event_date': event_date,
+                    'event_title': event_title,
+                    'transcript_data_source': None  # v3 provides direct file URLs
+                })
+                logger.info(f"[V3] Found transcript for event: {event_title} ({event_date})")
+            # --- END EVENT SELECTION AND DOCUMENT MAPPING ---
 
             logger.info(f"Selected {len(selected_files_details)} documents from the selected event.")
 
@@ -1115,32 +1149,38 @@ User's Original Query (for context if needed, but prioritize the objective above
 async def extract_transcript_text_fast(transcript_url: Optional[str], transcripts_data: Optional[Dict], session: aiohttp.ClientSession) -> Optional[Dict]:
     """Fast transcript text extraction without PDF generation.
     
+    Supports both v1 and v3 Quartr API formats.
+    
     Returns:
         Dict with 'text' and metadata, or None if extraction fails
     """
     try:
-        # Use the same logic as TranscriptProcessor.process_transcript but skip PDF generation
         # Determine the best raw transcript URL to fetch
         raw_transcript_url = None
 
-        # 1. Prioritize URLs from the transcripts dictionary if provided
-        if transcripts_data: # Check if the dictionary exists
+        # V3 API SUPPORT: If transcript_url is provided and looks like a direct file URL, use it
+        if transcript_url and ('files.quartr.com' in transcript_url or transcript_url.endswith('.json')):
+            raw_transcript_url = transcript_url
+            logger.info("[V3] Using direct transcript URL from v3 API for fast extraction.")
+        
+        # V1 API SUPPORT: Prioritize URLs from the transcripts dictionary if provided
+        elif transcripts_data: # Check if the dictionary exists (v1 format)
              # Check primary transcriptUrl within the dict first (less common in practice)
              if 'transcriptUrl' in transcripts_data and transcripts_data['transcriptUrl']:
                  raw_transcript_url = transcripts_data['transcriptUrl']
-                 logger.info("Using transcriptUrl from transcripts dict for fast extraction.")
+                 logger.info("[V1] Using transcriptUrl from transcripts dict for fast extraction.")
              # Check finishedLiveTranscriptUrl as the main target
              elif 'liveTranscripts' in transcripts_data and isinstance(transcripts_data.get('liveTranscripts'), dict) and \
                   'finishedLiveTranscriptUrl' in transcripts_data['liveTranscripts'] and transcripts_data['liveTranscripts']['finishedLiveTranscriptUrl']:
                  raw_transcript_url = transcripts_data['liveTranscripts']['finishedLiveTranscriptUrl']
-                 logger.info("Using finishedLiveTranscriptUrl from transcripts dict for fast extraction.")
+                 logger.info("[V1] Using finishedLiveTranscriptUrl from transcripts dict for fast extraction.")
              # Check liveTranscriptUrl as a fallback if finished is missing
              elif 'liveTranscripts' in transcripts_data and isinstance(transcripts_data.get('liveTranscripts'), dict) and \
                   'liveTranscriptUrl' in transcripts_data['liveTranscripts'] and transcripts_data['liveTranscripts']['liveTranscriptUrl']:
                  raw_transcript_url = transcripts_data['liveTranscripts']['liveTranscriptUrl']
-                 logger.info("Using liveTranscriptUrl from transcripts dict as fallback for fast extraction.")
+                 logger.info("[V1] Using liveTranscriptUrl from transcripts dict as fallback for fast extraction.")
 
-        # 2. If no URL found from dict, check the primary transcript_url argument
+        # 2. If no URL found from dict, check the primary transcript_url argument (v1 app URLs)
         if not raw_transcript_url and transcript_url:
             # If it's an app URL, attempt to resolve via API
             if 'app.quartr.com' in transcript_url:

@@ -344,7 +344,8 @@ class QuartrAPI:
         if not QUARTR_API_KEY:
             raise ValueError("Quartr API key not found in environment variables")
         self.api_key = QUARTR_API_KEY
-        self.base_url = "https://api.quartr.com/public/v1"
+        self.base_url_v3 = "https://api.quartr.com/public/v3"
+        self.base_url = "https://api.quartr.com/public/v1"  # Keep v1 for backwards compatibility
         # Use lowercase header key to mirror Postman exactly
         self.headers = {"x-api-key": self.api_key}
         try:
@@ -352,6 +353,11 @@ class QuartrAPI:
             logger.info(f"Quartr API key loaded (len={len(self.api_key)}): {masked}")
         except Exception:
             pass
+    
+    # Document type mapping constants for v3 API
+    TRANSCRIPT_TYPES = {15, 22}
+    SLIDES_TYPES = {5}
+    REPORT_TYPES = {6, 7, 10, 11, 12, 13, 14, 17, 18, 19, 20, 23, 25}
 
     async def get_company_events(self, company_id: str, session: aiohttp.ClientSession, event_type: str = "all") -> Dict:
         """Get company events from Quartr API using company ID (not ISIN)"""
@@ -432,6 +438,233 @@ class QuartrAPI:
         except Exception as e:
             logger.error(f"Error getting document from {doc_url}: {str(e)}")
             return None
+    
+    # ========== Quartr API v3 Methods ==========
+    
+    async def get_events_v3(self, company_id: str, session: aiohttp.ClientSession, limit: int = 100) -> Dict:
+        """Get company events from Quartr API v3
+        
+        Args:
+            company_id: Company Quartr ID
+            session: aiohttp ClientSession
+            limit: Number of events to fetch (max 100)
+            
+        Returns:
+            Dict with 'events' list and 'nextCursor' for pagination
+        """
+        url = f"{self.base_url_v3}/events"
+        
+        params = {
+            "companyIds": company_id,
+            "limit": min(limit, 100),  # Max 100 per API docs
+            "direction": "desc",
+            "sortBy": "date"
+        }
+        
+        try:
+            logger.info(f"Requesting events from Quartr API v3 for company ID: {company_id}")
+            
+            async with session.get(url, headers=self.headers, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    logger.info(f"Successfully retrieved {len(data.get('data', []))} events for company ID: {company_id}")
+                    
+                    return {
+                        'events': data.get('data', []),
+                        'nextCursor': data.get('pagination', {}).get('nextCursor')
+                    }
+                else:
+                    response_text = await response.text()
+                    logger.error(f"Error fetching events for company ID {company_id}: Status {response.status}, Response: {response_text}")
+                    return {'events': [], 'nextCursor': None}
+        except Exception as e:
+            logger.error(f"Exception while fetching events for company ID {company_id}: {str(e)}")
+            return {'events': [], 'nextCursor': None}
+    
+    async def get_audio_v3(self, company_id: str, event_ids: List[str], session: aiohttp.ClientSession, limit: int = 100) -> List[Dict]:
+        """Get audio files for events from Quartr API v3
+        
+        Args:
+            company_id: Company Quartr ID
+            event_ids: List of event IDs to fetch audio for
+            session: aiohttp ClientSession
+            limit: Number of audio files per page (max 100)
+            
+        Returns:
+            List of audio file dictionaries with eventId, fileUrl, etc.
+        """
+        if not event_ids:
+            return []
+        
+        url = f"{self.base_url_v3}/audio"
+        
+        all_audio = []
+        cursor = None
+        
+        while True:
+            params = {
+                "companyIds": company_id,
+                "eventIds": ",".join(str(eid) for eid in event_ids),
+                "limit": min(limit, 100),
+                "direction": "desc"
+            }
+            if cursor:
+                params["cursor"] = cursor
+            
+            try:
+                logger.info(f"Requesting audio from Quartr API v3 for {len(event_ids)} events")
+                
+                async with session.get(url, headers=self.headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        audio_items = data.get('data', [])
+                        all_audio.extend(audio_items)
+                        logger.info(f"Retrieved {len(audio_items)} audio files (total: {len(all_audio)})")
+                        
+                        # Check for next page
+                        cursor = data.get('pagination', {}).get('nextCursor')
+                        if not cursor:
+                            break
+                    else:
+                        response_text = await response.text()
+                        logger.error(f"Error fetching audio: Status {response.status}, Response: {response_text}")
+                        break
+            except Exception as e:
+                logger.error(f"Exception while fetching audio: {str(e)}")
+                break
+        
+        return all_audio
+    
+    async def get_documents_v3(self, company_id: str, event_ids: List[str], session: aiohttp.ClientSession, limit: int = 500) -> List[Dict]:
+        """Get documents for events from Quartr API v3
+        
+        Args:
+            company_id: Company Quartr ID
+            event_ids: List of event IDs to fetch documents for
+            session: aiohttp ClientSession
+            limit: Number of documents per page (max 500)
+            
+        Returns:
+            List of document dictionaries with eventId, fileUrl, typeId, etc.
+        """
+        if not event_ids:
+            return []
+        
+        url = f"{self.base_url_v3}/documents"
+        
+        all_documents = []
+        cursor = None
+        
+        while True:
+            params = {
+                "companyIds": company_id,
+                "eventIds": ",".join(str(eid) for eid in event_ids),
+                "limit": min(limit, 500),
+                "direction": "desc"
+            }
+            if cursor:
+                params["cursor"] = cursor
+            
+            try:
+                logger.info(f"Requesting documents from Quartr API v3 for {len(event_ids)} events")
+                
+                async with session.get(url, headers=self.headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        doc_items = data.get('data', [])
+                        all_documents.extend(doc_items)
+                        logger.info(f"Retrieved {len(doc_items)} documents (total: {len(all_documents)})")
+                        
+                        # Check for next page
+                        cursor = data.get('pagination', {}).get('nextCursor')
+                        if not cursor:
+                            break
+                    else:
+                        response_text = await response.text()
+                        logger.error(f"Error fetching documents: Status {response.status}, Response: {response_text}")
+                        break
+            except Exception as e:
+                logger.error(f"Exception while fetching documents: {str(e)}")
+                break
+        
+        return all_documents
+    
+    def map_documents_to_events(self, events: List[Dict], audio: List[Dict], documents: List[Dict]) -> Dict[int, Dict]:
+        """Map audio and documents to events by eventId using v3 typeId mapping
+        
+        Args:
+            events: List of event dictionaries from get_events_v3
+            audio: List of audio dictionaries from get_audio_v3
+            documents: List of document dictionaries from get_documents_v3
+            
+        Returns:
+            Dictionary mapping event_id to event data with documents
+        """
+        # Initialize event map
+        event_map = {}
+        for event in events:
+            event_id = event.get('id')
+            event_map[event_id] = {
+                'id': event_id,
+                'eventTitle': event.get('title', 'Unknown Event'),
+                'eventDate': event.get('date', ''),
+                'typeId': event.get('typeId'),
+                'fiscalYear': event.get('fiscalYear'),
+                'fiscalPeriod': event.get('fiscalPeriod'),
+                'documents': {}
+            }
+        
+        # Map audio to events
+        for audio_item in audio:
+            event_id = audio_item.get('eventId')
+            if event_id in event_map:
+                event_map[event_id]['documents']['audio'] = audio_item.get('fileUrl')
+        
+        # Map documents to events using typeId
+        for doc in documents:
+            event_id = doc.get('eventId')
+            if event_id not in event_map:
+                continue
+            
+            type_id = doc.get('typeId')
+            file_url = doc.get('fileUrl')
+            
+            if not file_url:
+                continue
+            
+            docs = event_map[event_id]['documents']
+            
+            # Map based on typeId with prioritization logic
+            if type_id in self.TRANSCRIPT_TYPES:
+                # Prioritize typeId 22 (in-house) over typeId 15 (standard)
+                if 'transcript' not in docs:
+                    # No transcript yet, add this one
+                    docs['transcript'] = file_url
+                    docs['transcript_typeId'] = type_id
+                    logger.info(f"Added transcript typeId {type_id} for event {event_id}")
+                elif 'transcript_typeId' in docs:
+                    # Transcript exists, check if we should replace it
+                    existing_type = docs['transcript_typeId']
+                    if type_id == 22 and existing_type == 15:
+                        # Replace standard transcript with in-house transcript
+                        docs['transcript'] = file_url
+                        docs['transcript_typeId'] = type_id
+                        logger.info(f"Upgraded transcript from typeId 15 (standard) to typeId 22 (in-house) for event {event_id}")
+                    elif type_id == 15 and existing_type == 22:
+                        # Keep in-house, ignore standard
+                        logger.debug(f"Keeping in-house transcript (typeId 22), ignoring standard (typeId 15) for event {event_id}")
+            elif type_id in self.SLIDES_TYPES and 'slides' not in docs:
+                docs['slides'] = file_url
+                docs['slides_typeId'] = type_id
+            elif type_id in self.REPORT_TYPES and 'report' not in docs:
+                docs['report'] = file_url
+                docs['report_typeId'] = type_id
+            else:
+                # Log unknown typeIds for future reference
+                if type_id not in (self.TRANSCRIPT_TYPES | self.SLIDES_TYPES | self.REPORT_TYPES):
+                    logger.warning(f"Unknown document typeId {type_id} for event {event_id}, URL: {file_url}")
+        
+        return event_map
 
 class TranscriptProcessor:
     @staticmethod
