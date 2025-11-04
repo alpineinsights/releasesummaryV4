@@ -568,11 +568,14 @@ async def process_company_documents(company_id: str, company_name: str, storage_
             
             # Filter to only earnings/sales release events (exclude conferences, AGMs, special events, etc.)
             # Quartr API v3 typeId values for earnings-related events:
-            # 1 = Q1 Earnings, 2 = Q2 Earnings, 3 = Q3 Earnings, 4 = Q4 Earnings
-            # 5 = Annual/Full Year Earnings, 6 = Semi-Annual Earnings
-            # 10 = Sales/Trading Update, 11 = Pre-earnings announcement
-            # Exclude: 7 = AGM, 8 = EGM, 9 = Conference, 12 = Investor Day, etc.
-            EARNINGS_TYPE_IDS = {1, 2, 3, 4, 5, 6, 10, 11}  # Earnings and sales releases
+            # INCLUDE:
+            #   1 = Q1 Earnings, 2 = Q2 Earnings, 3 = Q3 Earnings, 4 = Q4 Earnings
+            #   5 = Annual/Full Year Earnings, 6 = Semi-Annual Earnings
+            #   10 = Sales/Trading Update, 11 = Pre-earnings announcement
+            # EXCLUDE:
+            #   7 = AGM (Annual General Meeting), 8 = EGM (Extraordinary General Meeting)
+            #   9 = Conference, 12 = Investor Day, 13 = Capital Markets Day, etc.
+            EARNINGS_TYPE_IDS = {1, 2, 3, 4, 5, 6, 10, 11}  # Earnings and sales releases only
             
             earnings_events = []
             for event in events:
