@@ -48,7 +48,7 @@ except ImportError:
     print("Warning: PyMuPDF (fitz) not installed. PDF generation functionality may be limited.")
 
 from anthropic import Anthropic
-from datetime import datetime
+from datetime import datetime, timezone
 from logging_config import setup_logging # Assuming setup_logging exists
 from logger import logger  # Import the configured logger
 from urllib.parse import urlparse
@@ -544,6 +544,27 @@ async def process_company_documents(company_id: str, company_name: str, storage_
                 return [], None
 
             logger.info(f"[V3] Retrieved {len(events)} events from v3 API")
+            
+            # Filter out future events (only keep events that have already occurred)
+            now = datetime.now(timezone.utc)
+            past_events = []
+            for event in events:
+                event_date_str = event.get('date', '')
+                if event_date_str:
+                    try:
+                        # Parse the event date (format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+                        event_date = datetime.fromisoformat(event_date_str.replace('Z', '+00:00'))
+                        if event_date <= now:
+                            past_events.append(event)
+                        else:
+                            logger.debug(f"Skipping future event: {event.get('title')} ({event_date_str})")
+                    except (ValueError, AttributeError) as e:
+                        logger.warning(f"Could not parse event date '{event_date_str}': {e}")
+                        # Include events with unparseable dates to be safe
+                        past_events.append(event)
+            
+            logger.info(f"[V3] Filtered to {len(past_events)} past events (excluded {len(events) - len(past_events)} future events)")
+            events = past_events
             
             # Sort events by date (descending) - ensures events[0] is the latest
             events.sort(key=lambda x: x.get('date', ''), reverse=True)
