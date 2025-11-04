@@ -1253,12 +1253,14 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                         async with session.get(api_lookup_url, headers=headers) as response:
                             if response.status == 200:
                                 transcript_api_data = await response.json()
+                                logger.info(f"[TRANSCRIPT DEBUG API] JSON keys: {list(transcript_api_data.keys())}")
+                                
                                 if transcript_api_data and 'transcript' in transcript_api_data:
                                     # Try to get full structured data (could be the whole response for V3)
                                     full_transcript_json = transcript_api_data
                                     
-                                    # Check if this has V3 structure with paragraphs
-                                    if 'speaker_mapping' in full_transcript_json and 'paragraphs' in full_transcript_json:
+                                    # Check if this has V3 structure with paragraphs (check FIRST)
+                                    if 'speaker_mapping' in full_transcript_json and 'paragraphs' in full_transcript_json and len(full_transcript_json.get('paragraphs', [])) > 0:
                                         text = "PARAGRAPHS_AVAILABLE"
                                         logger.info(f"[V3 API TRANSCRIPT] Detected V3 format from API with {len(full_transcript_json.get('speaker_mapping', []))} speakers and {len(full_transcript_json.get('paragraphs', []))} paragraphs")
                                     else:
@@ -1304,15 +1306,19 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                             text = None
                             
                             if isinstance(transcript_data, dict):
+                                # Log keys for debugging
+                                logger.info(f"[TRANSCRIPT DEBUG] JSON keys: {list(transcript_data.keys())}")
+                                
                                 # V3 format: {"version": "1.0.0", "speaker_mapping": [...], "transcript": {"text": "..."}, "paragraphs": [...]}
-                                if 'speaker_mapping' in transcript_data and 'paragraphs' in transcript_data:
+                                # Check this FIRST before checking for 'transcript' key alone
+                                if 'speaker_mapping' in transcript_data and 'paragraphs' in transcript_data and len(transcript_data.get('paragraphs', [])) > 0:
                                     full_json = transcript_data
                                     # Don't use transcript.text - format_transcript_text will use paragraphs directly
                                     # Just set a placeholder to indicate we have data
                                     text = "PARAGRAPHS_AVAILABLE"
                                     logger.info(f"[V3 TRANSCRIPT] Detected V3 format with {len(transcript_data.get('speaker_mapping', []))} speakers and {len(transcript_data.get('paragraphs', []))} paragraphs")
-                                # V1 format: {"transcript": {"text": "..."}}
-                                elif 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict):
+                                # V1 format: {"transcript": {"text": "..."}} (but NO speaker_mapping)
+                                elif 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict) and 'speaker_mapping' not in transcript_data:
                                     text = transcript_data['transcript'].get('text', '')
                                     full_json = transcript_data
                                     logger.info(f"[V1 TRANSCRIPT] Detected V1 format with {len(text)} characters")
