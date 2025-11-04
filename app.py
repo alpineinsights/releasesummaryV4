@@ -1260,8 +1260,10 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                                     # Check if this has V3 structure with paragraphs
                                     if 'speaker_mapping' in full_transcript_json and 'paragraphs' in full_transcript_json:
                                         text = "PARAGRAPHS_AVAILABLE"
+                                        logger.info(f"[V3 API TRANSCRIPT] Detected V3 format from API with {len(full_transcript_json.get('speaker_mapping', []))} speakers and {len(full_transcript_json.get('paragraphs', []))} paragraphs")
                                     else:
                                         text = transcript_api_data.get('transcript', {}).get('text', '')
+                                        logger.info(f"[V1 API TRANSCRIPT] Detected V1 format from API with {len(text)} characters")
                                     
                                     if text:
                                         text_param = "" if text == "PARAGRAPHS_AVAILABLE" else text
@@ -1308,14 +1310,17 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                                     # Don't use transcript.text - format_transcript_text will use paragraphs directly
                                     # Just set a placeholder to indicate we have data
                                     text = "PARAGRAPHS_AVAILABLE"
+                                    logger.info(f"[V3 TRANSCRIPT] Detected V3 format with {len(transcript_data.get('speaker_mapping', []))} speakers and {len(transcript_data.get('paragraphs', []))} paragraphs")
                                 # V1 format: {"transcript": {"text": "..."}}
                                 elif 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict):
                                     text = transcript_data['transcript'].get('text', '')
                                     full_json = transcript_data
+                                    logger.info(f"[V1 TRANSCRIPT] Detected V1 format with {len(text)} characters")
                                 # Simple format: {"text": "..."}
                                 elif 'text' in transcript_data:
                                     text = transcript_data['text']
                                     full_json = transcript_data
+                                    logger.info(f"[SIMPLE TRANSCRIPT] Detected simple format with {len(text)} characters")
                             
                             if text:
                                 # Pass empty string as text when we have full_json with paragraphs

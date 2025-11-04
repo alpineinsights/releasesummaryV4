@@ -712,8 +712,10 @@ class TranscriptProcessor:
                                         # Check if this has V3 structure with paragraphs
                                         if 'speaker_mapping' in full_transcript_json and 'paragraphs' in full_transcript_json:
                                             text = "PARAGRAPHS_AVAILABLE"
+                                            logger.info(f"[V3 API TRANSCRIPT] Detected V3 format from API with {len(full_transcript_json.get('speaker_mapping', []))} speakers and {len(full_transcript_json.get('paragraphs', []))} paragraphs")
                                         else:
                                             text = transcript_api_data.get('transcript', {}).get('text', '')
+                                            logger.info(f"[V1 API TRANSCRIPT] Detected V1 format from API with {len(text)} characters")
                                         
                                         if text:
                                             text_param = "" if text == "PARAGRAPHS_AVAILABLE" else text
@@ -756,14 +758,17 @@ class TranscriptProcessor:
                                         full_json = transcript_data
                                         # Don't use transcript.text - format_transcript_text will use paragraphs directly
                                         text = "PARAGRAPHS_AVAILABLE"
+                                        logger.info(f"[V3 TRANSCRIPT] Detected V3 format with {len(transcript_data.get('speaker_mapping', []))} speakers and {len(transcript_data.get('paragraphs', []))} paragraphs")
                                     # V1 format: {"transcript": {"text": "..."}}
                                     elif 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict):
                                         text = transcript_data['transcript'].get('text', '')
                                         full_json = transcript_data
+                                        logger.info(f"[V1 TRANSCRIPT] Detected V1 format with {len(text)} characters")
                                     # Simple structure: {"text": "..."}
                                     elif 'text' in transcript_data:
                                         text = transcript_data['text']
                                         full_json = transcript_data
+                                        logger.info(f"[SIMPLE TRANSCRIPT] Detected simple format with {len(text)} characters")
                                 # TODO: Potentially handle list-based JSONL structure if needed
 
                                 if text:
@@ -844,11 +849,13 @@ class TranscriptProcessor:
                     
                     speakers_dict[speaker_id] = label
                 
+                logger.info(f"Built speaker mapping: {speakers_dict}")
+                
                 # Format paragraphs with speaker names
                 formatted_parts = []
                 current_speaker = None
                 
-                for para in paragraphs:
+                for i, para in enumerate(paragraphs):
                     speaker_id = para.get('speaker')
                     para_text = para.get('text', '').strip()
                     
@@ -858,15 +865,19 @@ class TranscriptProcessor:
                     # Add speaker label if speaker changed
                     if speaker_id != current_speaker:
                         speaker_label = speakers_dict.get(speaker_id, f'Speaker {speaker_id}')
-                        formatted_parts.append(f"\n\n[{speaker_label}]")
+                        # Use === as a clear marker for PDF parsing
+                        formatted_parts.append(f"==SPEAKER=={speaker_label}")
                         current_speaker = speaker_id
+                        logger.debug(f"Paragraph {i}: Added speaker label: {speaker_label}")
                     
                     # Add the paragraph text
                     formatted_parts.append(para_text)
                     formatted_parts.append("")  # Add blank line after each paragraph
                 
                 formatted_text = '\n'.join(formatted_parts)
-                logger.info("Successfully formatted transcript with speaker attribution")
+                # Log sample of formatted parts for debugging
+                logger.info(f"First 3 formatted parts: {formatted_parts[:3]}")
+                logger.info(f"Successfully formatted transcript with speaker attribution. Total length: {len(formatted_text)} chars. First 500 chars: {formatted_text[:500]}")
                 return formatted_text.strip()
         
         # Fallback to basic formatting if JSON structure not available
@@ -1002,19 +1013,24 @@ class TranscriptProcessor:
         
         # Split transcript into lines and process
         lines = transcript_text.split('\n')
+        speaker_count = 0
         for line in lines:
             line = line.strip()
             if not line:
                 continue
             
-            # Check if this is a speaker label (format: [Speaker Name])
-            if line.startswith('[') and line.endswith(']'):
+            # Check if this is a speaker label (format: ==SPEAKER==Name)
+            if line.startswith('==SPEAKER=='):
                 # This is a speaker label - use special formatting
-                speaker_name = line[1:-1]  # Remove brackets
+                speaker_name = line.replace('==SPEAKER==', '', 1).strip()
                 clean_speaker = speaker_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                speaker_count += 1
                 try:
-                    story.append(Spacer(1, 10))  # Extra space before speaker
-                    story.append(Paragraph(f"<b>{clean_speaker}</b>", speaker_style))
+                    story.append(Spacer(1, 14))  # Extra space before speaker
+                    # Use a more prominent style for speaker labels
+                    story.append(Paragraph(f"<b><font size=12 color='#1a472a'>► {clean_speaker}</font></b>", speaker_style))
+                    story.append(Spacer(1, 6))  # Space after speaker before their text
+                    logger.debug(f"Added speaker label #{speaker_count}: {speaker_name}")
                 except Exception as e:
                     logger.error(f"Error adding speaker label to PDF: {str(e)}")
                     continue
@@ -1027,6 +1043,8 @@ class TranscriptProcessor:
                 except Exception as e:
                     logger.error(f"Error adding paragraph to PDF: {str(e)}")
                     continue
+        
+        logger.info(f"PDF generation processed {speaker_count} speaker labels")
 
         try:
             # --- Define page drawing functions inside create_pdf ---
