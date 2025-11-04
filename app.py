@@ -566,6 +566,40 @@ async def process_company_documents(company_id: str, company_name: str, storage_
             logger.info(f"[V3] Filtered to {len(past_events)} past events (excluded {len(events) - len(past_events)} future events)")
             events = past_events
             
+            # Filter to only earnings/sales release events (exclude conferences, AGMs, special events, etc.)
+            # Quartr API v3 typeId values for earnings-related events:
+            # 1 = Q1 Earnings, 2 = Q2 Earnings, 3 = Q3 Earnings, 4 = Q4 Earnings
+            # 5 = Annual/Full Year Earnings, 6 = Semi-Annual Earnings
+            # 10 = Sales/Trading Update, 11 = Pre-earnings announcement
+            # Exclude: 7 = AGM, 8 = EGM, 9 = Conference, 12 = Investor Day, etc.
+            EARNINGS_TYPE_IDS = {1, 2, 3, 4, 5, 6, 10, 11}  # Earnings and sales releases
+            
+            earnings_events = []
+            for event in events:
+                event_type_id = event.get('typeId')
+                event_title = event.get('title', '')
+                
+                # Include event if it has a valid earnings typeId
+                if event_type_id in EARNINGS_TYPE_IDS:
+                    earnings_events.append(event)
+                    logger.debug(f"Including earnings event: {event_title} (typeId: {event_type_id})")
+                else:
+                    # Additional check: exclude if title explicitly mentions AGM, Conference, etc.
+                    title_upper = event_title.upper()
+                    if any(keyword in title_upper for keyword in ['AGM', 'ANNUAL GENERAL MEETING', 'CONFERENCE', 'INVESTOR DAY', 'CMD', 'CAPITAL MARKETS DAY']):
+                        logger.debug(f"Excluding non-earnings event: {event_title} (typeId: {event_type_id})")
+                    else:
+                        # If typeId is unknown but title doesn't indicate non-earnings, include it to be safe
+                        # This handles cases where typeId might be missing or new
+                        if event_type_id is None or event.get('fiscalPeriod') or event.get('fiscalYear'):
+                            earnings_events.append(event)
+                            logger.info(f"Including event with unknown/missing typeId but has fiscal info: {event_title} (typeId: {event_type_id})")
+                        else:
+                            logger.debug(f"Excluding event: {event_title} (typeId: {event_type_id})")
+            
+            logger.info(f"[V3] Filtered to {len(earnings_events)} earnings/sales events (excluded {len(events) - len(earnings_events)} non-earnings events)")
+            events = earnings_events
+            
             # Sort events by date (descending) - ensures events[0] is the latest
             events.sort(key=lambda x: x.get('date', ''), reverse=True)
 
