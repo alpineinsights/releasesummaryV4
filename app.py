@@ -1254,11 +1254,18 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                             if response.status == 200:
                                 transcript_api_data = await response.json()
                                 if transcript_api_data and 'transcript' in transcript_api_data:
-                                    # Try to get full structured data
-                                    full_transcript_json = transcript_api_data.get('transcript', {})
-                                    text = full_transcript_json.get('text', '')
+                                    # Try to get full structured data (could be the whole response for V3)
+                                    full_transcript_json = transcript_api_data
+                                    
+                                    # Check if this has V3 structure with paragraphs
+                                    if 'speaker_mapping' in full_transcript_json and 'paragraphs' in full_transcript_json:
+                                        text = "PARAGRAPHS_AVAILABLE"
+                                    else:
+                                        text = transcript_api_data.get('transcript', {}).get('text', '')
+                                    
                                     if text:
-                                        formatted_text = TranscriptProcessor.format_transcript_text(text, full_transcript_json)
+                                        text_param = "" if text == "PARAGRAPHS_AVAILABLE" else text
+                                        formatted_text = TranscriptProcessor.format_transcript_text(text_param, full_transcript_json)
                                         logger.info(f"Successfully extracted transcript text via API lookup (fast), length: {len(formatted_text)}")
                                         return {
                                             'text': formatted_text,
@@ -1298,7 +1305,9 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                                 # V3 format: {"version": "1.0.0", "speaker_mapping": [...], "transcript": {"text": "..."}, "paragraphs": [...]}
                                 if 'speaker_mapping' in transcript_data and 'paragraphs' in transcript_data:
                                     full_json = transcript_data
-                                    text = transcript_data.get('transcript', {}).get('text', '')
+                                    # Don't use transcript.text - format_transcript_text will use paragraphs directly
+                                    # Just set a placeholder to indicate we have data
+                                    text = "PARAGRAPHS_AVAILABLE"
                                 # V1 format: {"transcript": {"text": "..."}}
                                 elif 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict):
                                     text = transcript_data['transcript'].get('text', '')
@@ -1309,7 +1318,9 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                                     full_json = transcript_data
                             
                             if text:
-                                formatted_text = TranscriptProcessor.format_transcript_text(text, full_json)
+                                # Pass empty string as text when we have full_json with paragraphs
+                                text_param = "" if text == "PARAGRAPHS_AVAILABLE" else text
+                                formatted_text = TranscriptProcessor.format_transcript_text(text_param, full_json)
                                 logger.info(f"Successfully extracted transcript text (fast), length: {len(formatted_text)}")
                                 return {
                                     'text': formatted_text,
