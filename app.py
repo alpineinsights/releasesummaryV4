@@ -1303,9 +1303,18 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
             logger.info(f"Fetching transcript from determined URL for fast extraction: {raw_transcript_url}")
             try:
                 # Add API key for both api.quartr.com and files.quartr.com to get full JSON with paragraphs
-                headers = {"X-Api-Key": QUARTR_API_KEY} if ('api.quartr.com' in raw_transcript_url or 'files.quartr.com' in raw_transcript_url) else {}
+                # Also add Accept header to ensure full JSON response
+                headers = {}
+                if 'api.quartr.com' in raw_transcript_url or 'files.quartr.com' in raw_transcript_url:
+                    headers = {
+                        "X-Api-Key": QUARTR_API_KEY,
+                        "Accept": "application/json"
+                    }
+                    logger.info(f"Sending request with Quartr API authentication to {raw_transcript_url[:60]}...")
+                
                 async with session.get(raw_transcript_url, headers=headers) as response:
                     if response.status == 200:
+                        logger.info(f"Received response status 200, Content-Type: {response.headers.get('Content-Type', 'unknown')}, Content-Length: {response.headers.get('Content-Length', 'unknown')}")
                         try:
                             # Assume JSON/JSONL first
                             transcript_data = await response.json()
@@ -1315,6 +1324,7 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                             if isinstance(transcript_data, dict):
                                 # Log keys for debugging
                                 logger.info(f"[TRANSCRIPT DEBUG] JSON keys: {list(transcript_data.keys())}")
+                                logger.info(f"[TRANSCRIPT DEBUG] Has paragraphs: {'paragraphs' in transcript_data}, Paragraph count: {len(transcript_data.get('paragraphs', []))}")
                                 
                                 # V3 format with full paragraphs: {"version": "1.0.0", "speaker_mapping": [...], "paragraphs": [...], "transcript": {"text": "..."}}
                                 if 'speaker_mapping' in transcript_data and 'paragraphs' in transcript_data and len(transcript_data.get('paragraphs', [])) > 0:
