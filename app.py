@@ -1258,10 +1258,14 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                                 if transcript_api_data and 'transcript' in transcript_api_data:
                                     full_transcript_json = transcript_api_data
                                     
-                                    # V3 format with full paragraphs
-                                    if 'speaker_mapping' in full_transcript_json and 'paragraphs' in full_transcript_json and len(full_transcript_json.get('paragraphs', [])) > 0:
+                                    # V3 format with full paragraphs - paragraphs are INSIDE transcript object
+                                    transcript_obj = full_transcript_json.get('transcript', {})
+                                    has_paragraphs = isinstance(transcript_obj, dict) and 'paragraphs' in transcript_obj
+                                    para_count = len(transcript_obj.get('paragraphs', [])) if isinstance(transcript_obj, dict) else 0
+                                    
+                                    if 'speaker_mapping' in full_transcript_json and has_paragraphs and para_count > 0:
                                         text = "PARAGRAPHS_AVAILABLE"
-                                        logger.info(f"[V3 API FULL] Detected V3 format with paragraphs: {len(full_transcript_json.get('speaker_mapping', []))} speakers, {len(full_transcript_json.get('paragraphs', []))} paragraphs")
+                                        logger.info(f"[V3 API FULL] Detected V3 format with paragraphs: {len(full_transcript_json.get('speaker_mapping', []))} speakers, {para_count} paragraphs")
                                     
                                     # V3 format WITHOUT paragraphs but WITH speaker_mapping: use plain text
                                     elif 'speaker_mapping' in full_transcript_json:
@@ -1316,21 +1320,29 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                     if response.status == 200:
                         logger.info(f"Received response status 200, Content-Type: {response.headers.get('Content-Type', 'unknown')}, Content-Length: {response.headers.get('Content-Length', 'unknown')}")
                         try:
-                            # Assume JSON/JSONL first
-                            transcript_data = await response.json()
+                            # Read raw bytes first to check actual size
+                            raw_bytes = await response.read()
+                            logger.info(f"[TRANSCRIPT DEBUG] Received {len(raw_bytes)} bytes from server")
+                            
+                            # Parse JSON from bytes
+                            transcript_data = json.loads(raw_bytes.decode('utf-8'))
                             full_json = None
                             text = None
                             
                             if isinstance(transcript_data, dict):
                                 # Log keys for debugging
                                 logger.info(f"[TRANSCRIPT DEBUG] JSON keys: {list(transcript_data.keys())}")
-                                logger.info(f"[TRANSCRIPT DEBUG] Has paragraphs: {'paragraphs' in transcript_data}, Paragraph count: {len(transcript_data.get('paragraphs', []))}")
+                                transcript_obj = transcript_data.get('transcript', {})
+                                has_paragraphs = isinstance(transcript_obj, dict) and 'paragraphs' in transcript_obj
+                                para_count = len(transcript_obj.get('paragraphs', [])) if isinstance(transcript_obj, dict) else 0
+                                logger.info(f"[TRANSCRIPT DEBUG] Has paragraphs in transcript object: {has_paragraphs}, Paragraph count: {para_count}")
                                 
-                                # V3 format with full paragraphs: {"version": "1.0.0", "speaker_mapping": [...], "paragraphs": [...], "transcript": {"text": "..."}}
-                                if 'speaker_mapping' in transcript_data and 'paragraphs' in transcript_data and len(transcript_data.get('paragraphs', [])) > 0:
+                                # V3 format with full paragraphs: {"speaker_mapping": [...], "transcript": {"text": "...", "paragraphs": [...]}}
+                                # Paragraphs are INSIDE the transcript object!
+                                if 'speaker_mapping' in transcript_data and has_paragraphs and para_count > 0:
                                     full_json = transcript_data
                                     text = "PARAGRAPHS_AVAILABLE"
-                                    logger.info(f"[V3 FULL] Detected V3 format with paragraphs: {len(transcript_data.get('speaker_mapping', []))} speakers, {len(transcript_data.get('paragraphs', []))} paragraphs")
+                                    logger.info(f"[V3 FULL] Detected V3 format with paragraphs: {len(transcript_data.get('speaker_mapping', []))} speakers, {para_count} paragraphs")
                                 
                                 # V3 format WITHOUT paragraphs but WITH speaker_mapping: use plain text as fallback
                                 elif 'speaker_mapping' in transcript_data and 'transcript' in transcript_data:
