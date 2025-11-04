@@ -708,13 +708,19 @@ class TranscriptProcessor:
                                     logger.info(f"[TRANSCRIPT DEBUG API OLD] JSON keys: {list(transcript_api_data.keys())}")
                                     
                                     if transcript_api_data and 'transcript' in transcript_api_data:
-                                        # Full JSON could have V3 structure at top level or V1 structure nested
                                         full_transcript_json = transcript_api_data
                                         
-                                        # Check if this has V3 structure with paragraphs (check FIRST)
+                                        # V3 format with full paragraphs
                                         if 'speaker_mapping' in full_transcript_json and 'paragraphs' in full_transcript_json and len(full_transcript_json.get('paragraphs', [])) > 0:
                                             text = "PARAGRAPHS_AVAILABLE"
-                                            logger.info(f"[V3 API TRANSCRIPT] Detected V3 format from API with {len(full_transcript_json.get('speaker_mapping', []))} speakers and {len(full_transcript_json.get('paragraphs', []))} paragraphs")
+                                            logger.info(f"[V3 API FULL] Detected V3 format with paragraphs: {len(full_transcript_json.get('speaker_mapping', []))} speakers, {len(full_transcript_json.get('paragraphs', []))} paragraphs")
+                                        
+                                        # V3 format WITHOUT paragraphs but WITH speaker_mapping: use plain text
+                                        elif 'speaker_mapping' in full_transcript_json:
+                                            text = transcript_api_data.get('transcript', {}).get('text', '')
+                                            logger.info(f"[V3 API BASIC] Detected V3 format without paragraphs: {len(full_transcript_json.get('speaker_mapping', []))} speakers, text length: {len(text)}")
+                                        
+                                        # V1 format (no speaker_mapping)
                                         else:
                                             text = transcript_api_data.get('transcript', {}).get('text', '')
                                             logger.info(f"[V1 API TRANSCRIPT] Detected V1 format from API with {len(text)} characters")
@@ -745,7 +751,8 @@ class TranscriptProcessor:
             if raw_transcript_url:
                 logger.info(f"Fetching transcript from determined URL: {raw_transcript_url}")
                 try:
-                    headers = {"X-Api-Key": QUARTR_API_KEY} if 'api.quartr.com' in raw_transcript_url else {}
+                    # Add API key for both api.quartr.com and files.quartr.com to get full JSON with paragraphs
+                    headers = {"X-Api-Key": QUARTR_API_KEY} if ('api.quartr.com' in raw_transcript_url or 'files.quartr.com' in raw_transcript_url) else {}
                     async with session.get(raw_transcript_url, headers=headers) as response:
                         if response.status == 200:
                             try:
@@ -758,18 +765,24 @@ class TranscriptProcessor:
                                     # Log keys for debugging
                                     logger.info(f"[TRANSCRIPT DEBUG] JSON keys: {list(transcript_data.keys())}")
                                     
-                                    # V3 format with speaker_mapping and paragraphs
-                                    # Check this FIRST before checking for 'transcript' key alone
+                                    # V3 format with full paragraphs
                                     if 'speaker_mapping' in transcript_data and 'paragraphs' in transcript_data and len(transcript_data.get('paragraphs', [])) > 0:
                                         full_json = transcript_data
-                                        # Don't use transcript.text - format_transcript_text will use paragraphs directly
                                         text = "PARAGRAPHS_AVAILABLE"
-                                        logger.info(f"[V3 TRANSCRIPT] Detected V3 format with {len(transcript_data.get('speaker_mapping', []))} speakers and {len(transcript_data.get('paragraphs', []))} paragraphs")
-                                    # V1 format: {"transcript": {"text": "..."}} (but NO speaker_mapping)
+                                        logger.info(f"[V3 FULL] Detected V3 format with paragraphs: {len(transcript_data.get('speaker_mapping', []))} speakers, {len(transcript_data.get('paragraphs', []))} paragraphs")
+                                    
+                                    # V3 format WITHOUT paragraphs but WITH speaker_mapping: use plain text as fallback
+                                    elif 'speaker_mapping' in transcript_data and 'transcript' in transcript_data:
+                                        full_json = transcript_data
+                                        text = transcript_data.get('transcript', {}).get('text', '') if isinstance(transcript_data.get('transcript'), dict) else ''
+                                        logger.info(f"[V3 BASIC] Detected V3 format without paragraphs (using plain text): {len(transcript_data.get('speaker_mapping', []))} speakers, text length: {len(text)}")
+                                    
+                                    # V1 format: {"transcript": {"text": "..."}} (NO speaker_mapping)
                                     elif 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict) and 'speaker_mapping' not in transcript_data:
                                         text = transcript_data['transcript'].get('text', '')
                                         full_json = transcript_data
                                         logger.info(f"[V1 TRANSCRIPT] Detected V1 format with {len(text)} characters")
+                                    
                                     # Simple structure: {"text": "..."}
                                     elif 'text' in transcript_data:
                                         text = transcript_data['text']
@@ -829,7 +842,7 @@ class TranscriptProcessor:
             speaker_mapping = transcript_json.get('speaker_mapping', [])
             paragraphs = transcript_json.get('paragraphs', [])
             
-            if speaker_mapping and paragraphs:
+            if speaker_mapping and paragraphs and len(paragraphs) > 0:
                 logger.info(f"Formatting transcript with speaker identification ({len(speaker_mapping)} speakers, {len(paragraphs)} paragraphs)")
                 
                 # Build speaker lookup dict
@@ -885,6 +898,11 @@ class TranscriptProcessor:
                 logger.info(f"First 3 formatted parts: {formatted_parts[:3]}")
                 logger.info(f"Successfully formatted transcript with speaker attribution. Total length: {len(formatted_text)} chars. First 500 chars: {formatted_text[:500]}")
                 return formatted_text.strip()
+            elif speaker_mapping and not paragraphs:
+                # Has speaker_mapping but no paragraphs - this is incomplete V3 data
+                # TODO: Investigate correct API endpoint to get full structured transcript with paragraphs for typeId 22
+                logger.warning(f"V3 transcript has speaker_mapping but missing paragraphs array. TypeId 22 should include paragraphs. Falling back to plain text.")
+                # Fall through to use plain text
         
         # Fallback to basic formatting if JSON structure not available
         if not text or text == "":
