@@ -771,7 +771,8 @@ async def process_company_documents(company_id: str, company_name: str, storage_
                                  'event_title': event_title,
                                  'event_date': event_date,
                                  'source': extracted_data.get('source', 'unknown'),
-                                 'original_url': original_url
+                                 'original_url': original_url,
+                                 'full_json': extracted_data.get('full_json')  # Store full JSON for PDF generation
                              }
                              logger.info(f"Successfully extracted transcript text (fast) for {event_title}, length: {len(extracted_data['text'])}")
                          else:
@@ -1210,7 +1211,7 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
     Supports both v1 and v3 Quartr API formats.
     
     Returns:
-        Dict with 'text' and metadata, or None if extraction fails
+        Dict with 'text', 'full_json' (if available), and metadata, or None if extraction fails
     """
     try:
         # Determine the best raw transcript URL to fetch
@@ -1253,13 +1254,16 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                             if response.status == 200:
                                 transcript_api_data = await response.json()
                                 if transcript_api_data and 'transcript' in transcript_api_data:
-                                    text = transcript_api_data['transcript'].get('text', '')
+                                    # Try to get full structured data
+                                    full_transcript_json = transcript_api_data.get('transcript', {})
+                                    text = full_transcript_json.get('text', '')
                                     if text:
-                                        formatted_text = TranscriptProcessor.format_transcript_text(text)
+                                        formatted_text = TranscriptProcessor.format_transcript_text(text, full_transcript_json)
                                         logger.info(f"Successfully extracted transcript text via API lookup (fast), length: {len(formatted_text)}")
                                         return {
                                             'text': formatted_text,
-                                            'source': 'api_lookup'
+                                            'source': 'api_lookup',
+                                            'full_json': full_transcript_json
                                         }
                                 logger.warning(f"API lookup successful but no transcript text found for {api_lookup_url}")
                             else:
@@ -1287,20 +1291,30 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                         try:
                             # Assume JSON/JSONL first
                             transcript_data = await response.json()
+                            full_json = None
                             text = None
+                            
                             if isinstance(transcript_data, dict):
-                                # Handle different possible JSON structures
-                                if 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict):
+                                # V3 format: {"version": "1.0.0", "speaker_mapping": [...], "transcript": {"text": "..."}, "paragraphs": [...]}
+                                if 'speaker_mapping' in transcript_data and 'paragraphs' in transcript_data:
+                                    full_json = transcript_data
+                                    text = transcript_data.get('transcript', {}).get('text', '')
+                                # V1 format: {"transcript": {"text": "..."}}
+                                elif 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict):
                                     text = transcript_data['transcript'].get('text', '')
-                                elif 'text' in transcript_data: # Simpler structure
+                                    full_json = transcript_data
+                                # Simple format: {"text": "..."}
+                                elif 'text' in transcript_data:
                                     text = transcript_data['text']
+                                    full_json = transcript_data
                             
                             if text:
-                                formatted_text = TranscriptProcessor.format_transcript_text(text)
+                                formatted_text = TranscriptProcessor.format_transcript_text(text, full_json)
                                 logger.info(f"Successfully extracted transcript text (fast), length: {len(formatted_text)}")
                                 return {
                                     'text': formatted_text,
-                                    'source': 'json_url'
+                                    'source': 'json_url',
+                                    'full_json': full_json
                                 }
                         except json.JSONDecodeError:
                             # Try as plain text
@@ -1310,7 +1324,8 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
                                 logger.info(f"Successfully extracted transcript as plain text (fast), length: {len(formatted_text)}")
                                 return {
                                     'text': formatted_text,
-                                    'source': 'text_url'
+                                    'source': 'text_url',
+                                    'full_json': None
                                 }
                     else:
                         logger.error(f"Failed to fetch transcript from {raw_transcript_url}, status: {response.status}")
@@ -1326,8 +1341,16 @@ async def extract_transcript_text_fast(transcript_url: Optional[str], transcript
 
 # Add background PDF generation function
 async def generate_transcript_pdf_background(transcript_text: str, company_name: str, event_title: str, event_date: str, 
-                                           storage_handler: AWSS3StorageHandler) -> Optional[Dict]:
+                                           storage_handler: AWSS3StorageHandler, transcript_json: Optional[Dict] = None) -> Optional[Dict]:
     """Generate transcript PDF in background and upload to S3.
+    
+    Args:
+        transcript_text: Formatted transcript text
+        company_name: Company name
+        event_title: Event title
+        event_date: Event date
+        storage_handler: S3 storage handler
+        transcript_json: Optional full JSON with speaker data for better formatting
     
     Returns:
         Dict with 'filename', 'type', 'event_date', 'event_title', 'url' or None if failed
@@ -1336,6 +1359,7 @@ async def generate_transcript_pdf_background(transcript_text: str, company_name:
         loop = asyncio.get_running_loop()
         
         # Generate PDF in executor to avoid blocking
+        # Note: transcript_text is already formatted with speaker attribution from format_transcript_text
         pdf_content = await loop.run_in_executor(
             None, 
             TranscriptProcessor.create_pdf, 
@@ -1439,7 +1463,8 @@ async def run_analysis(company_name: str, query: str, conversation_context: List
                     transcript_text_data['company_name'],
                     transcript_text_data['event_title'],
                     transcript_text_data['event_date'],
-                    storage_handler
+                    storage_handler,
+                    transcript_text_data.get('full_json')  # Pass full JSON for potential future enhancements
                 )
             )
         

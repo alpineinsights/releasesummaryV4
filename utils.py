@@ -706,9 +706,10 @@ class TranscriptProcessor:
                                 if response.status == 200:
                                     transcript_api_data = await response.json()
                                     if transcript_api_data and 'transcript' in transcript_api_data:
-                                        text = transcript_api_data['transcript'].get('text', '')
+                                        full_transcript_json = transcript_api_data.get('transcript', {})
+                                        text = full_transcript_json.get('text', '')
                                         if text:
-                                            formatted_text = TranscriptProcessor.format_transcript_text(text)
+                                            formatted_text = TranscriptProcessor.format_transcript_text(text, full_transcript_json)
                                             logger.info(f"Successfully processed transcript via API lookup, length: {len(formatted_text)}")
                                             return formatted_text
                                     logger.warning(f"API lookup successful but no transcript text found for {api_lookup_url}")
@@ -738,17 +739,26 @@ class TranscriptProcessor:
                             try:
                                 # Assume JSON/JSONL first
                                 transcript_data = await response.json()
+                                full_json = None
                                 text = None
+                                
                                 if isinstance(transcript_data, dict):
-                                    # Handle different possible JSON structures
-                                    if 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict):
+                                    # V3 format with speaker_mapping and paragraphs
+                                    if 'speaker_mapping' in transcript_data and 'paragraphs' in transcript_data:
+                                        full_json = transcript_data
+                                        text = transcript_data.get('transcript', {}).get('text', '')
+                                    # V1 format: {"transcript": {"text": "..."}}
+                                    elif 'transcript' in transcript_data and isinstance(transcript_data['transcript'], dict):
                                         text = transcript_data['transcript'].get('text', '')
-                                    elif 'text' in transcript_data: # Simpler structure
+                                        full_json = transcript_data
+                                    # Simple structure: {"text": "..."}
+                                    elif 'text' in transcript_data:
                                         text = transcript_data['text']
+                                        full_json = transcript_data
                                 # TODO: Potentially handle list-based JSONL structure if needed
 
                                 if text:
-                                    formatted_text = TranscriptProcessor.format_transcript_text(text)
+                                    formatted_text = TranscriptProcessor.format_transcript_text(text, full_json)
                                     logger.info(f"Successfully processed JSON/L transcript, length: {len(formatted_text)}")
                                     return formatted_text
                                 else:
@@ -782,8 +792,72 @@ class TranscriptProcessor:
             return ''
     
     @staticmethod
-    def format_transcript_text(text: str) -> str:
-        """Format transcript text for better readability"""
+    def format_transcript_text(text: str, transcript_json: Optional[Dict] = None) -> str:
+        """Format transcript text for better readability with speaker attribution
+        
+        Args:
+            text: Plain text transcript (fallback if JSON not available)
+            transcript_json: Full transcript JSON with speaker_mapping and paragraphs
+            
+        Returns:
+            Formatted transcript with speaker names
+        """
+        # If we have the full JSON structure with speaker mapping, use it
+        if transcript_json and isinstance(transcript_json, dict):
+            speaker_mapping = transcript_json.get('speaker_mapping', [])
+            paragraphs = transcript_json.get('paragraphs', [])
+            
+            if speaker_mapping and paragraphs:
+                logger.info(f"Formatting transcript with speaker identification ({len(speaker_mapping)} speakers, {len(paragraphs)} paragraphs)")
+                
+                # Build speaker lookup dict
+                speakers_dict = {}
+                for speaker in speaker_mapping:
+                    speaker_id = speaker.get('speaker')
+                    speaker_data = speaker.get('speaker_data', {})
+                    name = speaker_data.get('name') or 'Unknown Speaker'
+                    role = speaker_data.get('role')
+                    company = speaker_data.get('company')
+                    
+                    # Format speaker label
+                    if name == 'Operator':
+                        label = 'Operator'
+                    elif role and company:
+                        label = f"{name} ({role}, {company})"
+                    elif role:
+                        label = f"{name} ({role})"
+                    elif company:
+                        label = f"{name} ({company})"
+                    else:
+                        label = name
+                    
+                    speakers_dict[speaker_id] = label
+                
+                # Format paragraphs with speaker names
+                formatted_parts = []
+                current_speaker = None
+                
+                for para in paragraphs:
+                    speaker_id = para.get('speaker')
+                    para_text = para.get('text', '').strip()
+                    
+                    if not para_text:
+                        continue
+                    
+                    # Add speaker label if speaker changed
+                    if speaker_id != current_speaker:
+                        speaker_label = speakers_dict.get(speaker_id, f'Speaker {speaker_id}')
+                        formatted_parts.append(f"\n[{speaker_label}]")
+                        current_speaker = speaker_id
+                    
+                    formatted_parts.append(para_text)
+                
+                formatted_text = '\n'.join(formatted_parts)
+                logger.info("Successfully formatted transcript with speaker attribution")
+                return formatted_text.strip()
+        
+        # Fallback to basic formatting if JSON structure not available
+        logger.info("Using basic transcript formatting (no speaker data available)")
         # Replace JSON line feed representations with actual line feeds
         text = text.replace('\\n', '\n')
         
@@ -897,16 +971,51 @@ class TranscriptProcessor:
         story.append(Paragraph(header_text, header_style))
         story.append(Spacer(1, 30))
 
-        paragraphs = transcript_text.split('\n\n')
-        for para in paragraphs:
-            if para.strip():
-                clean_para = para.strip().replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                try:
-                    story.append(Paragraph(clean_para, text_style))
-                    story.append(Spacer(1, 6))
-                except Exception as e:
-                    logger.error(f"Error adding paragraph to PDF: {str(e)}")
+        # Create a style for speaker labels
+        speaker_style = ParagraphStyle(
+            'SpeakerLabel',
+            parent=styles['Normal'],
+            fontSize=10,
+            leading=14,
+            spaceBefore=12,
+            spaceAfter=3,
+            fontName='Helvetica-Bold',
+            textColor=colors.HexColor('#1a472a')
+        )
+        
+        # Split by double newlines first, then process each section
+        sections = transcript_text.split('\n\n')
+        for section in sections:
+            if not section.strip():
+                continue
+            
+            # Split section by single newlines to handle speaker labels
+            lines = section.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
                     continue
+                
+                # Check if this is a speaker label (format: [Speaker Name])
+                if line.startswith('[') and line.endswith(']'):
+                    # This is a speaker label - use special formatting
+                    speaker_name = line[1:-1]  # Remove brackets
+                    clean_speaker = speaker_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    try:
+                        story.append(Spacer(1, 6))
+                        story.append(Paragraph(clean_speaker, speaker_style))
+                    except Exception as e:
+                        logger.error(f"Error adding speaker label to PDF: {str(e)}")
+                        continue
+                else:
+                    # Regular paragraph text
+                    clean_para = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    try:
+                        story.append(Paragraph(clean_para, text_style))
+                        story.append(Spacer(1, 4))
+                    except Exception as e:
+                        logger.error(f"Error adding paragraph to PDF: {str(e)}")
+                        continue
 
         try:
             # --- Define page drawing functions inside create_pdf ---
