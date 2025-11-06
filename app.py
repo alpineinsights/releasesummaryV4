@@ -1121,7 +1121,7 @@ User's Original Query (for context if needed, but prioritize the objective above
         logger.debug("Gemini API: Calling generate_content via loop.run_in_executor with partial")
         generate_func_with_args = functools.partial(
             client.models.generate_content,
-            model='gemini-2.0-flash', # Change model name here
+            model='gemini-2.5-flash-lite', # Change model name here
             contents=contents, # Pass the flat list directly
             config=generation_config_dict # Pass the combined config
         )
